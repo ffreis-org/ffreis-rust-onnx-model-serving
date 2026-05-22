@@ -1,0 +1,33 @@
+name: Mutation Testing (cargo-mutants)
+
+# Mutation testing is slow (15-90 min). Do NOT run on every PR.
+# - workflow_dispatch: manual trigger from the Actions UI
+# - schedule: Sunday 03:00 UTC weekly
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    uses: FelipeFuhr/ffreis-workflows-rust/.github/workflows/rust-mutation.yml@98d5d139853a40c6ae4175ead25a5b09e4130104 # main
+    with:
+      working-directory: app
+      # Start permissive — get a first green baseline, then raise.
+      # The app crate has 64 unit + 24 async + integration + e2e tests,
+      # so it should comfortably exceed 60 once the first run completes.
+      threshold: 60
+      # Restrict to the main app crate; integration-tests/e2e tests are
+      # already run as the corpus that catches mutants.
+      mutants-args: "-p app"
+      # cargo-mutants per worker rebuilds the workspace; cap parallelism
+      # to keep memory pressure low on the GH runner.
+      jobs: 2
+      timeout-minutes: 90
