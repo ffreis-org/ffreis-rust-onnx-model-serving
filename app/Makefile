@@ -21,6 +21,7 @@ E2E_MIN_TESTS ?= 3
 COVERAGE_SEGMENT_MAX_DRIFT ?= 10
 ROOT_DIR ?= $(abspath ..)
 COVERAGE_XML ?= $(ROOT_DIR)/coverage/cobertura.xml
+COVERAGE_LCOV ?= $(ROOT_DIR)/coverage/lcov.info
 INTEGRATION_COVERAGE_XML ?= $(ROOT_DIR)/coverage/cobertura-integration.xml
 E2E_COVERAGE_XML ?= $(ROOT_DIR)/coverage/cobertura-e2e.xml
 CHECK_COVERAGE_SCRIPT ?= $(ROOT_DIR)/scripts/check_coverage.py
@@ -142,6 +143,15 @@ coverage-e2e: ## Generate e2e-test coverage report
 	}
 	mkdir -p "$(COVERAGE_DIR)"
 	$(CARGO) llvm-cov --all-features --workspace --test e2e_tests --bins --cobertura --output-path "$(E2E_COVERAGE_XML)"
+
+.PHONY: coverage-lcov
+coverage-lcov: ## Generate coverage in lcov.info format (consumed by SonarCloud)
+	command -v cargo-llvm-cov >/dev/null 2>&1 || { \
+		echo "cargo-llvm-cov not installed. Install with: cargo install cargo-llvm-cov --locked"; \
+		exit 1; \
+	}
+	mkdir -p "$(COVERAGE_DIR)"
+	$(CARGO) llvm-cov --all-features --workspace --all-targets --lcov --output-path "$(COVERAGE_LCOV)"
 
 .PHONY: coverage-check
 coverage-check: ## Fail if coverage is below COVERAGE_MIN
