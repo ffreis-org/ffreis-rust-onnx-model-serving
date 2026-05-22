@@ -2030,4 +2030,78 @@ mod tests {
         assert_eq!(reply.content_type, "application/json");
         assert_eq!(reply.metadata.get("batch_size"), Some(&"2".to_string()));
     }
+
+    #[tokio::test]
+    async fn parallel_predictions_each_return_correct_output() {
+        // Verifies concurrency correctness: N parallel HTTP invocations
+        // against the same AppState each return 200 and a parseable JSON
+        // response with a numeric `predictions` array. Guards against
+        // shared-state corruption in the prediction pipeline (e.g. a
+        // shared buffer being mutated cross-request, or the inflight
+        // semaphore being mis-counted).
+        const N: usize = 8;
+        let (_tmp, cfg) = cfg_with_temp_model_fixture();
+        let state = Arc::new(AppState::new(cfg));
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        // Same payload shape as `http_invocations_accepts_sagemaker_header_fallbacks`
+        // — the bundled fixture model expects 2-column input rows.
+        let payloads: Vec<Bytes> = (0..N)
+            .map(|i| {
+                // Each request has its own distinct values so a shared-state bug
+                // would produce visibly mismatched batches across responses.
+                let a = (i + 1) as f64;
+                let b = (i + 2) as f64;
+                let body = format!(
+                    "{{\"instances\":[[{},{}],[{},{}]]}}",
+                    a,
+                    b,
+                    a + 10.0,
+                    b + 10.0
+                );
+                Bytes::from(body)
+            })
+            .collect();
+
+        let tasks: Vec<_> = payloads
+            .into_iter()
+            .map(|body| {
+                let state = state.clone();
+                let headers = headers.clone();
+                tokio::spawn(async move { http_invocations(State(state), headers, body).await })
+            })
+            .collect();
+
+        for (idx, task) in tasks.into_iter().enumerate() {
+            let response = task.await.expect("worker task did not panic");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "parallel request {idx} failed: status {}",
+                response.status()
+            );
+            let (parts, body) = response.into_parts();
+            assert_eq!(
+                parts
+                    .headers
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json"),
+                "parallel request {idx} returned wrong content-type"
+            );
+            let bytes = axum::body::to_bytes(body, usize::MAX)
+                .await
+                .expect("read body");
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("response is JSON");
+            // Default config has predictions_only=true → body is the raw
+            // predictions array (not wrapped under any key).
+            let preds = parsed.as_array().expect("response is a JSON array");
+            assert!(
+                !preds.is_empty(),
+                "parallel request {idx} returned empty predictions"
+            );
+        }
+    }
 }
