@@ -71,6 +71,12 @@ jobs:
           make -C app coverage
           test -s coverage/cobertura.xml
 
+      - name: Generate lcov coverage for SonarCloud
+        run: |
+          set -euo pipefail
+          make -C app coverage-lcov
+          test -s coverage/lcov.info
+
       - name: Integration and E2E coverage thresholds
         run: |
           set -euo pipefail
