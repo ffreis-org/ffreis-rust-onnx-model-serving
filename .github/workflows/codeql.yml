@@ -8,17 +8,16 @@ on:
   schedule:
     - cron: "0 0 * * 1"
 
-permissions:
-  actions: read
-  contents: read
-  security-events: write
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   codeql:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-codeql.yml@01e2b12e992621fecf074b8a202f66044196f3bf
     with:
       languages: "python,ruby"

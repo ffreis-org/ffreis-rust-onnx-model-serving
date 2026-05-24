@@ -28,9 +28,6 @@ on:
       - "rust-toolchain.toml"
       - ".github/workflows/code-review.yml"
 
-permissions:
-  contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -38,6 +35,8 @@ concurrency:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         shell: bash

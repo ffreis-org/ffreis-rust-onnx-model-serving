@@ -17,15 +17,14 @@ on:
   schedule:
     - cron: "0 9 * * 1"
 
-permissions:
-  contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   cargo-audit:
+    permissions:
+      contents: read
     uses: FelipeFuhr/ffreis-workflows-rust/.github/workflows/rust-security.yml@f3f3acf975d34494fb6d54ad107195a8808bc722
     with:
       working-directory: "app"

@@ -21,6 +21,8 @@ jobs:
   proptest-parity:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       matrix:
         profile: [pr, nightly]
