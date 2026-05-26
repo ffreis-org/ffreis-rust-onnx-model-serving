@@ -1,0 +1,20 @@
+name: DevOps / Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  release-please:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-release-please.yml@01e2b12e992621fecf074b8a202f66044196f3bf # v1.0.4
+    with:
+      config-file: .release-please-config.json
+      manifest-file: .release-please-manifest.json
+      target-branch: main
+    secrets:
+      RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
