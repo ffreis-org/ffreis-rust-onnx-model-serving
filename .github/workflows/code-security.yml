@@ -15,7 +15,7 @@ on:
       - "rust-toolchain.toml"
       - ".github/workflows/code-security.yml"
   schedule:
-    - cron: "0 9 * * 1"
+    - cron: "46 3 1 * *"  # monthly scattered (was: 0 9 * * 1)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

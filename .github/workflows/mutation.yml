@@ -6,7 +6,7 @@ name: Mutation Testing (cargo-mutants)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 0"
+    - cron: "13 11 11 * *"  # monthly scattered (was: 0 3 * * 0)
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
