@@ -2,6 +2,7 @@ name: Commit Checks (Lefthook)
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ main ]
     paths:
       - "app/**"
@@ -24,6 +25,7 @@ concurrency:
 
 jobs:
   lint-test:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
