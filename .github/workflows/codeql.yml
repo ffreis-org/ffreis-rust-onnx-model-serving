@@ -19,6 +19,6 @@ jobs:
       actions: read
       contents: read
       security-events: write
-    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-codeql.yml@d9792d01b442d7f2d3d2c6855cb312d885594e0f # v1.2.1
+    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-codeql.yml@caa797cc7baec52e99f21b86f532a4b7c88cf4fa # fix/grype-install-outside-scan-path
     with:
       languages: "python,ruby"

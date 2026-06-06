@@ -16,7 +16,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-release-please.yml@01e2b12e992621fecf074b8a202f66044196f3bf # v1.0.4
+    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-release-please.yml@caa797cc7baec52e99f21b86f532a4b7c88cf4fa # fix/grype-install-outside-scan-path
     with:
       config-file: .release-please-config.json
       manifest-file: .release-please-manifest.json
