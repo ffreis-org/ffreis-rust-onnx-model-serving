@@ -29,3 +29,6 @@ coverage/
 .coverage.*
 coverage.xml
 lcov.info
+
+# Sonar / scanner artifacts
+.scannerwork/
