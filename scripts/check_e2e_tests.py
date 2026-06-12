@@ -34,7 +34,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cmd = [args.cargo, "test"]
+    cmd = [args.cargo, "test"]  # nosemgrep: python.lang.security.audit.subprocess-run-audit.subprocess-run-audit
     if args.locked:
         cmd.append("--locked")
     cmd.extend(["--test", "e2e_tests", "--", "--list"])

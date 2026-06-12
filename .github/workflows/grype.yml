@@ -84,9 +84,11 @@ jobs:
           done
       - name: Upload Grype SARIF (per image)
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
-        permissions:
-          security-events: write
-          contents: read
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for f in grype-results/*.sarif; do
@@ -96,11 +98,9 @@ jobs:
 
             gh api \
               -X POST \
-              /repos/${{ github.repository }}/code-scanning/sarifs \
+              "/repos/${REPO}/code-scanning/sarifs" \
               -f sarif="${sarif_payload}" \
               -f tool_name="grype-${name}" \
-              -f commit_sha="${{ github.sha }}" \
-              -f ref="${{ github.ref }}"
+              -f commit_sha="${SHA}" \
+              -f ref="${REF}"
           done
-        env:
-          GH_TOKEN: ${{ github.token }}
