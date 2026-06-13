@@ -46,6 +46,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
 
+      - name: Start Podman socket
+        run: |
+          set -euo pipefail
+          podman system service --time=0 &
+          SOCKET_PATH="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+          timeout 10 bash -c "until test -S \"${SOCKET_PATH}\"; do sleep 0.5; done"
+          echo "Podman socket ready at ${SOCKET_PATH}"
+
       - name: Build images (local)
         run: |
           set -euo pipefail
