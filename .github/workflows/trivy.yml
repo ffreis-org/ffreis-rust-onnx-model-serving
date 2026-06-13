@@ -53,6 +53,18 @@ jobs:
         run: |
           set -euo pipefail
           CONTAINER_COMMAND=podman make build
+      - name: Start Podman socket
+        run: |
+          set -euo pipefail
+          systemctl --user start podman.socket
+          PODMAN_SOCK="${XDG_RUNTIME_DIR}/podman/podman.sock"
+          end=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$end" ]; do
+            [ -S "$PODMAN_SOCK" ] && break
+            sleep 0.5
+          done
+          [ -S "$PODMAN_SOCK" ] || { echo "Podman socket did not start within 30s"; exit 1; }
+          echo "Podman socket ready at $PODMAN_SOCK"
       - name: Install Trivy
         run: |
           set -euo pipefail
