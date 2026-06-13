@@ -84,9 +84,6 @@ jobs:
           done
       - name: Upload Grype SARIF (per image)
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
-        permissions:
-          security-events: write
-          contents: read
         run: |
           set -euo pipefail
           for f in grype-results/*.sarif; do

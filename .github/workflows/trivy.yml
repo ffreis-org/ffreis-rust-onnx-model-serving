@@ -47,41 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           TRIVY_VERSION="${TRIVY_VERSION:-v0.67.2}"
-          TRIVY_URL="$(
-            python3 - "${TRIVY_VERSION}" <<'PY'
-import json
-import sys
-import urllib.request
-from urllib.error import HTTPError
-
-requested_tag = sys.argv[1]
-api_base = "https://api.github.com/repos/aquasecurity/trivy/releases"
-
-def fetch(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.load(resp)
-
-def pick_asset_url(release: dict) -> str | None:
-    assets = release.get("assets", [])
-    for asset in assets:
-        name = asset.get("name", "")
-        if name.endswith("_Linux-64bit.tar.gz"):
-            return asset.get("browser_download_url")
-    return None
-
-release = None
-try:
-    release = fetch(f"{api_base}/tags/{requested_tag}")
-except HTTPError:
-    release = fetch(f"{api_base}/latest")
-
-url = pick_asset_url(release)
-if not url:
-    raise SystemExit("Could not find Linux-64bit tarball for Trivy release")
-
-print(url)
-PY
-          )"
+          TRIVY_URL="$(python3 .github/scripts/get_trivy_url.py "${TRIVY_VERSION}")"
           TRIVY_TARBALL="$(basename "${TRIVY_URL}")"
 
           curl -fsSL --proto '=https' --proto-redir '=https' "${TRIVY_URL}" -o "${TRIVY_TARBALL}"

@@ -19,15 +19,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  proptest-parity:
+  proptest-parity-pr:
+    name: Property Parity (pr)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-    strategy:
-      matrix:
-        profile: [pr, nightly]
-    if: ${{ github.event_name != 'pull_request' || matrix.profile == 'pr' }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
@@ -43,7 +41,7 @@ jobs:
 
       - name: Run proptest parity checks
         env:
-          PROPTEST_CASES: ${{ matrix.profile == 'nightly' && '180' || '40' }}
+          PROPTEST_CASES: "40"
         run: |
           set -euo pipefail
           make test-property
@@ -52,6 +50,41 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: proptest-regressions-${{ matrix.profile }}-${{ github.run_id }}
+          name: proptest-regressions-pr-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: app/proptest-regressions/
+
+  proptest-parity-nightly:
+    name: Property Parity (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+
+      - name: Run proptest parity checks
+        env:
+          PROPTEST_CASES: "180"
+        run: |
+          set -euo pipefail
+          make test-property
+
+      - name: Upload proptest regressions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proptest-regressions-nightly-${{ github.run_id }}
           if-no-files-found: ignore
           path: app/proptest-regressions/
