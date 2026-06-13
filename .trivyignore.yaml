@@ -15,3 +15,131 @@ vulnerabilities:
       is updated to a build that includes the OpenSSL 3.5.5 package. Track in a
       separate chore/update-base-image-digest PR.
     expired_at: "2026-09-30T00:00:00Z"
+
+  # linux-libc-dev kernel header CVEs (7.0.0-22.22) — no fix available upstream.
+  # linux-libc-dev provides kernel API C headers needed to compile Rust crates that
+  # link against libc. These CVEs affect the kernel itself, not the header files:
+  # the running kernel is the host's kernel (not affected by the package inside the
+  # container), so these findings cannot be exploited via this container image.
+  # Re-review when Ubuntu releases a patched linux-libc-dev ≥ 7.0.0-22.23.
+  - id: CVE-2026-31608
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: smb: server: avoid double-free).
+      No fix available in ubuntu:resolute (7.0.0-22.22); kernel CVEs in header
+      packages are not exploitable inside a container — the host kernel runs on
+      the host, not inside the image. Re-review when a patched linux-libc-dev is
+      released.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-43501
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: ipv6: rpl: reserve mac_len headroom).
+      No fix available; not exploitable in container context (see CVE-2026-31608).
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-45988
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: rxrpc: Fix re-decryption of RESPONSE
+      packets). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46043
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: RDMA/rxe: Validate pad and ICRC).
+      No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46135
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: nvmet-tcp: fix race between ICReq
+      handling and queue teardown). No fix available; not exploitable in container
+      context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2025-54518
+    statement: >
+      linux-libc-dev kernel header CVE (Improper isolation of shared resources
+      within the CPU). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-31589
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: mm: call ->free_folio() directly).
+      No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-31607
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: usbip: validate number_of_packets).
+      No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-31705
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: ksmbd: fix out-of-bounds write in
+      smb2_get_ea()). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-31718
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: ksmbd: fix use-after-free in
+      __ksmbd_close_fd()). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-43493
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: crypto: pcrypt - Fix handling of
+      MAY_BACKLOG). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46039
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: rxgk: Fix potential integer overflow
+      in length check). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46119
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: libceph: Fix slab-out-of-bounds
+      access in auth). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46185
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: smb/client: fix out-of-bounds read
+      in symlink_data()). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46195
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: smb: client: validate dacloffset
+      before building DACL). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46273
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: ibmveth: Disable GSO for packets
+      with small MSS). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46274
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: io-wq: check that the predecessor
+      is hashed). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46275
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: Bluetooth: hci_uart: fix UAFs and
+      race conditions). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46277
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: mm/zone_device: do not touch device
+      folio after put_zone_device_page()). No fix available; not exploitable in
+      container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46304
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: nvmet: avoid recursive nvmet-wq
+      flush). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46311
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: drm/amdgpu/userq: fix access to
+      stale wptr mapping). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46319
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: net/sched: act_ct: Only release RCU
+      read lock after CT lookup). No fix available; not exploitable in container
+      context.
+    expired_at: "2026-12-31T00:00:00Z"
+  - id: CVE-2026-46320
+    statement: >
+      linux-libc-dev kernel header CVE (kernel: tap: free page on error paths in
+      tap_get_user_xdp()). No fix available; not exploitable in container context.
+    expired_at: "2026-12-31T00:00:00Z"
