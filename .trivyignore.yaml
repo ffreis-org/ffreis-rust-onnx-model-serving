@@ -7,11 +7,11 @@
 #
 # Reference:
 # https://trivy.dev/latest/docs/configuration/filtering/#by-finding-ids
-vulnerabilities: []
-# Example entry:
-# vulnerabilities:
-#   - id: CVE-2099-0001
-#     paths:
-#       - "usr/lib/x86_64-linux-gnu/libexample.so.1"
-#     statement: "Accepted temporarily until base image digest update lands."
-#     expired_at: "2026-12-31"
+vulnerabilities:
+  - id: CVE-2026-45447
+    statement: >
+      Heap Use-After-Free in OpenSSL PKCS7_verify() (libssl3t64 3.5.3-1ubuntu2).
+      Fixed in 3.5.5-1ubuntu3.2. Suppressed until ubuntu:resolute base image digest
+      is updated to a build that includes the OpenSSL 3.5.5 package. Track in a
+      separate chore/update-base-image-digest PR.
+    expired_at: "2026-09-30"

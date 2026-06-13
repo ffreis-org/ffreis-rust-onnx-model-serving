@@ -95,6 +95,25 @@ jobs:
           set -euo pipefail
           mkdir -p grype-results
 
+          # Write grype ignore policy:
+          # - Exclude cargo registry dir (downloaded dep source code with their own
+          #   Cargo.lock files) to suppress false positives from build-only toolchain.
+          # - Suppress known OS CVE until ubuntu:resolute base image digest is updated
+          #   (CVE-2026-45447: libssl3t64 3.5.3→3.5.5; track in chore/update-base-image).
+          # libssl3t64 3.5.3-1ubuntu2 → fixed in 3.5.5-1ubuntu3.2
+          # Blocked on ubuntu:resolute base image digest update (chore/update-base-image).
+          cat > .grype.yaml << 'GRYPE_EOF'
+          ignore:
+            - vulnerability: CVE-2026-45447
+              package:
+                name: libssl3t64
+                type: deb
+            - vulnerability: CVE-2026-45447
+              package:
+                name: openssl-provider-legacy
+                type: deb
+          GRYPE_EOF
+
           images=(ffreis/base ffreis/base-builder ffreis/builder ffreis/base-runner ffreis/runner)
 
           for image in "${images[@]}"; do
@@ -103,7 +122,12 @@ jobs:
 
             # Capture exit code: grype returns 2 when HIGH/CRITICAL found (--fail-on high).
             # Write gate-status so the upload step still runs even with findings.
-            if ./bin/grype "podman:${image}" -o sarif --file "$out" --fail-on high; then
+            # --exclude skips the cargo registry cache (downloaded dep source code with
+            # their own Cargo.lock files) to avoid false positives from transitive deps
+            # of build-only toolchain packages. The project's build/Cargo.lock is still scanned.
+            if ./bin/grype "podman:${image}" \
+              --exclude "home/appuser/.cargo/registry/**" \
+              -o sarif --file "$out" --fail-on high; then
               echo "PASS" > "grype-results/${name}.gate-status"
             else
               exit_code=$?

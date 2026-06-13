@@ -97,6 +97,9 @@ jobs:
             name="${image##*/}"
             # 1) Always produce SARIF for all severities so GitHub code scanning
             # has complete visibility, regardless of pass/fail gate outcome.
+            # --skip-dirs excludes the cargo registry cache (downloaded dep source code
+            # including their own Cargo.lock files) to avoid false positives. The project
+            # build output at build/Cargo.lock is still scanned.
             trivy image \
               --image-src podman \
               --skip-db-update \
@@ -105,6 +108,7 @@ jobs:
               --scanners vuln \
               --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --ignore-unfixed \
+              --skip-dirs home/appuser/.cargo/registry \
               --exit-code 0 \
               --format sarif \
               --output "trivy-results/${name}.sarif" \
@@ -120,6 +124,7 @@ jobs:
               --scanners vuln \
               --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --ignore-unfixed \
+              --skip-dirs home/appuser/.cargo/registry \
               --exit-code 0 \
               --format json \
               --output "trivy-results/${name}.json" \
@@ -136,6 +141,7 @@ jobs:
               --scanners vuln \
               --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
               --ignore-unfixed \
+              --skip-dirs home/appuser/.cargo/registry \
               --exit-code 0 \
               --format table \
               "$image"
@@ -152,6 +158,7 @@ jobs:
               --ignorefile .trivyignore.yaml \
               --scanners vuln \
               --severity HIGH,CRITICAL \
+              --skip-dirs home/appuser/.cargo/registry \
               --exit-code 1 \
               --format table \
               "$image"; then
