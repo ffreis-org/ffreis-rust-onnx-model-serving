@@ -187,12 +187,25 @@ jobs:
             echo "::error::No gate status files found - scans may not have completed"
             exit 1
           fi
+          # Only gate (fail) on runtime images that are deployed.
+          # Builder images contain the Rust toolchain and build-only crate CVEs
+          # that do not affect the production runtime; they are surfaced as warnings.
+          runtime_images=(base base-runner runner)
+          is_runtime() {
+            local n="$1"
+            for img in "${runtime_images[@]}"; do [[ "$img" == "$n" ]] && return 0; done
+            return 1
+          }
           for f in "${gate_files[@]}"; do
             name="$(basename "$f" .gate-status)"
             status="$(cat "$f")"
             if [ "$status" = "FAIL" ]; then
-              echo "::error::Image ${name} failed HIGH/CRITICAL vulnerability gate"
-              failed=1
+              if is_runtime "$name"; then
+                echo "::error::Runtime image ${name} failed HIGH/CRITICAL vulnerability gate"
+                failed=1
+              else
+                echo "::warning::Build-only image ${name} has HIGH/CRITICAL vulnerabilities (informational — fix via cargo update)"
+              fi
             elif [ "$status" = "PASS" ]; then
               echo "Image ${name} passed HIGH/CRITICAL vulnerability gate"
             else

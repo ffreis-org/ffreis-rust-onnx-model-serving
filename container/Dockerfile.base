@@ -2,12 +2,14 @@ ARG BASE_IMAGE=__BASE_IMAGE__
 ARG BASE_DIGEST=__BASE_DIGEST__
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
 
-# Create unprivileged user
-RUN (getent group appgroup >/dev/null 2>&1 || groupadd -g 10001 appgroup) \
-    && (id -u appuser >/dev/null 2>&1 || useradd -u 10001 -g appgroup -m -s /usr/sbin/nologin appuser)
-
-# Create app dir with correct ownership
-RUN install -d -m 0750 -o appuser -g appgroup /app
+# Upgrade security-sensitive packages not yet in the pinned base digest,
+# then create the unprivileged user. Keep both in one layer to minimise size.
+RUN apt-get update \
+    && apt-get install -y --only-upgrade libssl3t64 openssl-provider-legacy \
+    && rm -rf /var/lib/apt/lists/* \
+    && (getent group appgroup >/dev/null 2>&1 || groupadd -g 10001 appgroup) \
+    && (id -u appuser >/dev/null 2>&1 || useradd -u 10001 -g appgroup -m -s /usr/sbin/nologin appuser) \
+    && install -d -m 0750 -o appuser -g appgroup /app
 WORKDIR /app
 
 USER appuser:appgroup

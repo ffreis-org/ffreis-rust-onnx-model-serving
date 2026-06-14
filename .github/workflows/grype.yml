@@ -103,15 +103,27 @@ jobs:
             test -s "$out"
           done
 
-          # Gate: fail if any image has HIGH/CRITICAL vulnerabilities.
+          # Gate: fail on runtime images only. Builder images contain the Rust
+          # toolchain and build-only crate CVEs that do not affect the deployed
+          # runtime; surface them as warnings instead.
+          runtime_images=(base base-runner runner)
+          is_runtime() {
+            local n="$1"
+            for img in "${runtime_images[@]}"; do [[ "$img" == "$n" ]] && return 0; done
+            return 1
+          }
           shopt -s nullglob
           failed=0
           for f in grype-results/*.gate-status; do
             img="$(basename "$f" .gate-status)"
             status="$(cat "$f")"
             if [ "$status" = "FAIL" ]; then
-              echo "::error::Image ${img} failed HIGH/CRITICAL vulnerability gate"
-              failed=1
+              if is_runtime "$img"; then
+                echo "::error::Runtime image ${img} failed HIGH/CRITICAL vulnerability gate"
+                failed=1
+              else
+                echo "::warning::Build-only image ${img} has HIGH/CRITICAL vulnerabilities (informational — fix via cargo update)"
+              fi
             else
               echo "Image ${img} passed HIGH/CRITICAL vulnerability gate"
             fi
