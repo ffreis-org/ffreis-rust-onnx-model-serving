@@ -1,294 +1,41 @@
 use std::collections::HashMap;
-use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderName, StatusCode};
-use axum::response::{Html, IntoResponse, Response as AxumResponse};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tokio::time::timeout;
+use tokio::sync::{RwLock, Semaphore};
 use tonic::transport::Server;
-use tonic::{Code, Request, Response, Status};
-use tract_onnx::prelude::{tvec, Framework, InferenceModelExt, RunnableModel, TypedFact, TypedOp};
 
+pub mod adapter;
 mod config;
+pub mod grpc_service;
+pub mod http;
+pub mod input;
+pub mod openapi;
 mod telemetry;
-
-pub use config::AppConfig;
-use telemetry::attach_trace_correlation_headers;
-pub use telemetry::init_telemetry;
 
 pub mod grpc {
     tonic::include_proto!("onnxserving.grpc");
 }
 
-const JSON_CONTENT_TYPES: &[&str] = &["application/json", "application/*+json"];
-const JSON_LINES_CONTENT_TYPES: &[&str] = &[
-    "application/jsonlines",
-    "application/x-jsonlines",
-    "application/jsonl",
-    "application/x-ndjson",
-];
-const CSV_CONTENT_TYPES: &[&str] = &["text/csv", "application/csv"];
-const SAGEMAKER_CONTENT_TYPE_HEADER: &str = "x-amzn-sagemaker-content-type";
-const SAGEMAKER_ACCEPT_HEADER: &str = "x-amzn-sagemaker-accept";
-const OPENAPI_SPEC_PATH_ENV_KEY: &str = "OPENAPI_SPEC_PATH";
-const SWAGGER_UI_HTML: &str = r##"<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.ui = SwaggerUIBundle({
-      url: "/openapi.yaml",
-      dom_id: "#swagger-ui",
-      deepLinking: true,
-      presets: [SwaggerUIBundle.presets.apis],
-    });
-  </script>
-</body>
-</html>
-"##;
+pub use config::AppConfig;
+pub use telemetry::init_telemetry;
 
-#[derive(Clone, Debug)]
-pub struct ParsedInput {
-    pub x: Option<Vec<Vec<f64>>>,
-    pub tensors: Option<HashMap<String, Value>>,
-    pub meta: Option<Value>,
-}
-
-impl ParsedInput {
-    fn batch_size(&self) -> Result<usize, String> {
-        if let Some(x) = &self.x {
-            return Ok(x.len());
-        }
-        if let Some(tensors) = &self.tensors {
-            let mut inferred: Vec<usize> = Vec::new();
-            for value in tensors.values() {
-                match value {
-                    Value::Array(rows) => inferred.push(rows.len()),
-                    _ => return Err("ONNX input tensor must be array-like".to_string()),
-                }
-            }
-            if inferred.is_empty() {
-                return Err("Parsed input contained no features/tensors".to_string());
-            }
-            if inferred.contains(&0) {
-                return Err("ONNX_DYNAMIC_BATCH enabled but batch dimension invalid".to_string());
-            }
-            if inferred.windows(2).any(|w| w[0] != w[1]) {
-                return Err(format!(
-                    "ONNX inputs have mismatched batch sizes: {inferred:?}"
-                ));
-            }
-            return Ok(inferred[0]);
-        }
-        Err("Parsed input contained no features/tensors".to_string())
-    }
-}
-
-pub trait BaseAdapter: Send + Sync {
-    fn is_ready(&self) -> bool;
-    fn predict(&self, parsed_input: &ParsedInput) -> Result<Value, String>;
-}
-
-type OnnxRunnableModel = RunnableModel<
-    TypedFact,
-    Box<dyn TypedOp>,
-    tract_onnx::prelude::Graph<TypedFact, Box<dyn TypedOp>>,
->;
-
-#[derive(Clone)]
-struct OnnxAdapter {
-    cfg: AppConfig,
-    model: Option<OnnxRunnableModel>,
-    output_map: HashMap<String, String>,
-}
-
-impl OnnxAdapter {
-    fn new(cfg: AppConfig) -> Result<Self, String> {
-        let path = cfg.model_path()?;
-        if !path.exists() {
-            return Err(format!("ONNX model not found: {}", path.display()));
-        }
-        let model = tract_onnx::onnx()
-            .model_for_path(&path)
-            .and_then(|model| model.into_optimized())
-            .and_then(|model| model.into_runnable())
-            .map_err(|e| {
-                format!(
-                    "Failed to load or prepare ONNX model {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
-        let output_map = load_json_map(&cfg.onnx_output_map_json)?;
-        Ok(Self {
-            cfg,
-            model: Some(model),
-            output_map,
-        })
-    }
-
-    fn parsed_input_to_rows(parsed_input: &ParsedInput) -> Result<Vec<Vec<f64>>, String> {
-        if let Some(rows) = &parsed_input.x {
-            return Ok(rows.clone());
-        }
-        if let Some(tensors) = &parsed_input.tensors {
-            if tensors.is_empty() {
-                return Err("Parsed input contained no tensors".to_string());
-            }
-            if tensors.len() > 1 {
-                return Err(format!(
-                    "Parsed input contained {} ONNX input tensors, but this adapter \
-                     currently supports only a single input tensor",
-                    tensors.len()
-                ));
-            }
-            let first = tensors
-                .values()
-                .next()
-                .expect("non-empty map must have a first value");
-            return value_to_numeric_rows(first);
-        }
-        Err("Parsed input contained no features/tensors".to_string())
-    }
-
-    fn rows_to_tensor(rows: &[Vec<f64>]) -> Result<tract_onnx::prelude::Tensor, String> {
-        if rows.is_empty() {
-            return Err("Parsed payload is empty".to_string());
-        }
-        let n_rows = rows.len();
-        let n_cols = rows[0].len();
-        if rows.iter().any(|row| row.len() != n_cols) {
-            return Err("Input rows have inconsistent feature counts".to_string());
-        }
-        let flat = rows
-            .iter()
-            .flat_map(|row| row.iter().copied())
-            .map(|value| value as f32)
-            .collect::<Vec<f32>>();
-        let arr = tract_onnx::prelude::tract_ndarray::Array2::<f32>::from_shape_vec(
-            (n_rows, n_cols),
-            flat,
-        )
-        .map_err(|err| format!("failed to build input tensor: {err}"))?;
-        Ok(arr.into())
-    }
-
-    fn array_view_to_json<T, F>(
-        view: tract_onnx::prelude::tract_ndarray::ArrayViewD<'_, T>,
-        to_value: F,
-    ) -> Value
-    where
-        T: Copy,
-        F: Fn(T) -> Value + Copy,
-    {
-        if view.ndim() == 1 {
-            return Value::Array(view.iter().copied().map(to_value).collect::<Vec<Value>>());
-        }
-        if view.ndim() == 2 {
-            let rows = view
-                .outer_iter()
-                .map(|row| Value::Array(row.iter().copied().map(to_value).collect::<Vec<Value>>()))
-                .collect::<Vec<Value>>();
-            return Value::Array(rows);
-        }
-        Value::Array(view.iter().copied().map(to_value).collect::<Vec<Value>>())
-    }
-
-    fn tensor_to_json(tensor: &tract_onnx::prelude::Tensor) -> Result<Value, String> {
-        if let Ok(view) = tensor.to_array_view::<f32>() {
-            return Ok(Self::array_view_to_json(view, |v| Value::from(v as f64)));
-        }
-        if let Ok(view) = tensor.to_array_view::<i64>() {
-            return Ok(Self::array_view_to_json(view, Value::from));
-        }
-        Err("unsupported ONNX output tensor dtype".to_string())
-    }
-}
-
-impl BaseAdapter for OnnxAdapter {
-    fn is_ready(&self) -> bool {
-        self.model.is_some()
-    }
-
-    fn predict(&self, parsed_input: &ParsedInput) -> Result<Value, String> {
-        let rows = Self::parsed_input_to_rows(parsed_input)?;
-        let input = Self::rows_to_tensor(&rows)?;
-        let model = self
-            .model
-            .as_ref()
-            .ok_or_else(|| "ONNX model runtime unavailable".to_string())?;
-        let outputs = model
-            .run(tvec!(input.into()))
-            .map_err(|err| format!("ONNX inference failed: {err}"))?;
-
-        if !self.output_map.is_empty() {
-            let mut mapped = serde_json::Map::new();
-            for (response_key, onnx_output_name) in &self.output_map {
-                let index = onnx_output_name
-                    .parse::<usize>()
-                    .unwrap_or(0)
-                    .min(outputs.len().saturating_sub(1));
-                mapped.insert(response_key.clone(), Self::tensor_to_json(&outputs[index])?);
-            }
-            return Ok(Value::Object(mapped));
-        }
-
-        if !self.cfg.onnx_output_name.trim().is_empty() {
-            let index = self
-                .cfg
-                .onnx_output_name
-                .parse::<usize>()
-                .unwrap_or(self.cfg.onnx_output_index)
-                .min(outputs.len().saturating_sub(1));
-            return Self::tensor_to_json(&outputs[index]);
-        }
-
-        let index = self
-            .cfg
-            .onnx_output_index
-            .min(outputs.len().saturating_sub(1));
-        Self::tensor_to_json(&outputs[index])
-    }
-}
-
-fn load_adapter(cfg: &AppConfig) -> Result<Arc<dyn BaseAdapter>, String> {
-    let model_exists = cfg.model_path().is_ok_and(|p| p.exists());
-    if cfg.model_type == "onnx" || model_exists {
-        let adapter = OnnxAdapter::new(cfg.clone())?;
-        return Ok(Arc::new(adapter));
-    }
-    if !cfg.model_type.is_empty() && cfg.model_type != "onnx" {
-        return Err(format!(
-            "MODEL_TYPE={} is not implemented in this package",
-            cfg.model_type
-        ));
-    }
-    Err("Set MODEL_TYPE=onnx or place model.onnx under SM_MODEL_DIR".to_string())
-}
+use adapter::{build_onnx_tensors, load_adapter, BaseAdapter};
+use input::{
+    apply_feature_selection, format_csv_predictions, load_json_map, load_multi_input_records,
+    normalized_accept, parse_csv_rows, parse_json_rows, parse_jsonl_rows, resolve_content_type,
+    should_use_onnx_multi_input, validate_input_mode, validate_tabular_matrix_shape,
+    wrap_predictions_if_needed, ParsedInput, CSV_CONTENT_TYPES, JSON_CONTENT_TYPES,
+    JSON_LINES_CONTENT_TYPES,
+};
 
 #[derive(Clone)]
 pub struct AppState {
-    cfg: AppConfig,
-    adapter: Arc<RwLock<Option<Arc<dyn BaseAdapter>>>>,
-    inflight: Arc<Semaphore>,
+    pub(crate) cfg: AppConfig,
+    pub(crate) adapter: Arc<RwLock<Option<Arc<dyn BaseAdapter>>>>,
+    pub(crate) inflight: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -301,7 +48,7 @@ impl AppState {
         }
     }
 
-    async fn ensure_adapter_loaded(&self) -> Result<Arc<dyn BaseAdapter>, String> {
+    pub(crate) async fn ensure_adapter_loaded(&self) -> Result<Arc<dyn BaseAdapter>, String> {
         if let Some(existing) = self.adapter.read().await.as_ref() {
             return Ok(existing.clone());
         }
@@ -311,7 +58,11 @@ impl AppState {
         Ok(loaded)
     }
 
-    fn parse_payload(&self, payload: &[u8], content_type: &str) -> Result<ParsedInput, String> {
+    pub(crate) fn parse_payload(
+        &self,
+        payload: &[u8],
+        content_type: &str,
+    ) -> Result<ParsedInput, String> {
         validate_input_mode(&self.cfg)?;
         let normalized = resolve_content_type(content_type);
         let onnx_input_map = load_json_map(&self.cfg.onnx_input_map_json)?;
@@ -370,7 +121,11 @@ impl AppState {
         })
     }
 
-    fn format_output(&self, predictions: Value, accept: &str) -> Result<(Vec<u8>, String), String> {
+    pub(crate) fn format_output(
+        &self,
+        predictions: Value,
+        accept: &str,
+    ) -> Result<(Vec<u8>, String), String> {
         if predictions.is_object() {
             let bytes = serde_json::to_vec(&predictions)
                 .map_err(|err| format!("failed to encode json: {err}"))?;
@@ -390,644 +145,8 @@ impl AppState {
     }
 }
 
-fn validate_input_mode(cfg: &AppConfig) -> Result<(), String> {
-    if cfg.input_mode != "tabular" {
-        return Err(format!(
-            "INPUT_MODE={} not implemented (tabular only for now)",
-            cfg.input_mode
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_content_type(raw: &str) -> String {
-    strip_content_type_params(raw)
-}
-
-fn should_use_onnx_multi_input(
-    onnx_input_map: &HashMap<String, String>,
-    content_type: &str,
-) -> bool {
-    !onnx_input_map.is_empty() && is_json_content_type(content_type)
-}
-
-fn validate_tabular_matrix_shape(matrix: &[Vec<f64>], cfg: &AppConfig) -> Result<(), String> {
-    if matrix.is_empty() {
-        return Err("Parsed payload is empty".to_string());
-    }
-    if cfg.tabular_num_features > 0 {
-        let got = matrix.first().map_or(0, |r| r.len());
-        if got != cfg.tabular_num_features {
-            return Err(format!(
-                "Feature count mismatch: got {got} expected TABULAR_NUM_FEATURES={}",
-                cfg.tabular_num_features
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn apply_feature_selection(
-    matrix: Vec<Vec<f64>>,
-    cfg: &AppConfig,
-) -> Result<Vec<Vec<f64>>, String> {
-    if cfg.tabular_feature_columns.is_empty() && cfg.tabular_id_columns.is_empty() {
-        return Ok(matrix);
-    }
-    let n_cols = matrix.first().map_or(0, |r| r.len());
-    let feature_idx = if !cfg.tabular_feature_columns.is_empty() {
-        parse_col_selector(&cfg.tabular_feature_columns, n_cols)?
-    } else {
-        let id_idx = parse_col_selector(&cfg.tabular_id_columns, n_cols)?;
-        (0..n_cols)
-            .filter(|col| !id_idx.contains(col))
-            .collect::<Vec<usize>>()
-    };
-    Ok(matrix
-        .iter()
-        .map(|row| {
-            feature_idx
-                .iter()
-                .map(|idx| row[*idx])
-                .collect::<Vec<f64>>()
-        })
-        .collect::<Vec<Vec<f64>>>())
-}
-
-fn strip_content_type_params(content_type: &str) -> String {
-    content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn is_json_content_type(content_type: &str) -> bool {
-    JSON_CONTENT_TYPES.contains(&content_type) || JSON_LINES_CONTENT_TYPES.contains(&content_type)
-}
-
-fn load_multi_input_records(
-    payload: &[u8],
-    content_type: &str,
-    cfg: &AppConfig,
-) -> Result<Vec<HashMap<String, Value>>, String> {
-    if JSON_CONTENT_TYPES.contains(&content_type) {
-        return parse_json_records(payload, cfg);
-    }
-    parse_jsonl_records(payload)
-}
-
-fn validate_dynamic_batch_sizes(batch_sizes: &[usize]) -> Result<(), String> {
-    if batch_sizes.is_empty() || batch_sizes.contains(&0) {
-        return Err("ONNX_DYNAMIC_BATCH enabled but batch dimension invalid".to_string());
-    }
-    if batch_sizes.windows(2).any(|w| w[0] != w[1]) {
-        return Err(format!(
-            "ONNX inputs have mismatched batch sizes: {batch_sizes:?}"
-        ));
-    }
-    Ok(())
-}
-
-fn build_onnx_tensors(
-    records: &[HashMap<String, Value>],
-    input_map: &HashMap<String, String>,
-    dynamic_batch: bool,
-) -> Result<HashMap<String, Value>, String> {
-    let mut tensors = HashMap::new();
-    let mut batch_sizes = Vec::new();
-
-    for (request_key, onnx_input_name) in input_map {
-        let mut values = Vec::new();
-        for record in records {
-            let value = record.get(request_key).ok_or_else(|| {
-                format!(
-                    "Missing key '{}' in one of the records for ONNX multi-input",
-                    request_key
-                )
-            })?;
-            values.push(value.clone());
-        }
-        if dynamic_batch {
-            batch_sizes.push(values.len());
-        }
-        tensors.insert(onnx_input_name.clone(), Value::Array(values));
-    }
-
-    if dynamic_batch {
-        validate_dynamic_batch_sizes(&batch_sizes)?;
-    }
-
-    Ok(tensors)
-}
-
-fn load_json_map(raw: &str) -> Result<HashMap<String, String>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let value: Value = serde_json::from_str(trimmed)
-        .map_err(|err| format!("Expected JSON object mapping: {err}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "Expected JSON object mapping".to_string())?;
-    let mut out = HashMap::new();
-    for (key, val) in object {
-        let s = val.as_str().ok_or_else(|| {
-            format!(
-                "Expected string value for key '{}' in JSON object mapping",
-                key
-            )
-        })?;
-        out.insert(key.clone(), s.to_string());
-    }
-    Ok(out)
-}
-
-fn parse_json_records(
-    payload: &[u8],
-    cfg: &AppConfig,
-) -> Result<Vec<HashMap<String, Value>>, String> {
-    let value: Value =
-        serde_json::from_slice(payload).map_err(|err| format!("invalid json payload: {err}"))?;
-    let scoped = if value.is_object() {
-        if let Some(field) = value.get(&cfg.json_key_instances) {
-            field.clone()
-        } else {
-            value
-        }
-    } else {
-        value
-    };
-    if let Some(obj) = scoped.as_object() {
-        return Ok(vec![obj
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<String, Value>>()]);
-    }
-    let arr = scoped.as_array().ok_or_else(|| {
-        "ONNX multi-input mode expects a JSON object or a non-empty list of objects".to_string()
-    })?;
-    let mut out = Vec::new();
-    for item in arr {
-        let map = item.as_object().ok_or_else(|| {
-            "ONNX multi-input mode expects each record to be a JSON object".to_string()
-        })?;
-        out.push(
-            map.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<HashMap<String, Value>>(),
-        );
-    }
-    Ok(out)
-}
-
-fn parse_jsonl_records(payload: &[u8]) -> Result<Vec<HashMap<String, Value>>, String> {
-    let text =
-        std::str::from_utf8(payload).map_err(|err| format!("invalid utf-8 payload: {err}"))?;
-    let mut out = Vec::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let value: Value = serde_json::from_str(line)
-            .map_err(|err| format!("invalid json line payload: {err}"))?;
-        let map = value.as_object().ok_or_else(|| {
-            "ONNX multi-input mode expects each record to be a JSON object".to_string()
-        })?;
-        out.push(
-            map.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<HashMap<String, Value>>(),
-        );
-    }
-    Ok(out)
-}
-
-fn parse_json_rows(payload: &[u8], cfg: &AppConfig) -> Result<Vec<Vec<f64>>, String> {
-    let value: Value =
-        serde_json::from_slice(payload).map_err(|err| format!("invalid json payload: {err}"))?;
-    let scoped = if let Some(instances) = value.get(&cfg.json_key_instances) {
-        instances.clone()
-    } else if let Some(features) = value.get(&cfg.jsonl_features_key) {
-        Value::Array(vec![features.clone()])
-    } else {
-        value
-    };
-    value_to_numeric_rows(&scoped)
-}
-
-fn parse_jsonl_rows(payload: &[u8], cfg: &AppConfig) -> Result<Vec<Vec<f64>>, String> {
-    let text =
-        std::str::from_utf8(payload).map_err(|err| format!("invalid utf-8 payload: {err}"))?;
-    let mut rows = Vec::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let value: Value = serde_json::from_str(line)
-            .map_err(|err| format!("invalid json line payload: {err}"))?;
-        if let Some(obj) = value.as_object() {
-            if let Some(features) = obj.get(&cfg.jsonl_features_key) {
-                rows.extend(value_to_numeric_rows(features)?);
-                continue;
-            }
-        }
-        rows.extend(value_to_numeric_rows(&value)?);
-    }
-    Ok(rows)
-}
-
-fn value_to_numeric_rows(value: &Value) -> Result<Vec<Vec<f64>>, String> {
-    if let Some(arr) = value.as_array() {
-        if arr.first().is_some_and(|item| item.is_array()) {
-            return arr
-                .iter()
-                .map(|row| {
-                    row.as_array()
-                        .ok_or_else(|| "Expected array row".to_string())?
-                        .iter()
-                        .map(|item| {
-                            item.as_f64()
-                                .ok_or_else(|| "Expected numeric value in payload".to_string())
-                        })
-                        .collect::<Result<Vec<f64>, String>>()
-                })
-                .collect::<Result<Vec<Vec<f64>>, String>>();
-        }
-        return Ok(vec![arr
-            .iter()
-            .map(|item| {
-                item.as_f64()
-                    .ok_or_else(|| "Expected numeric value in payload".to_string())
-            })
-            .collect::<Result<Vec<f64>, String>>()?]);
-    }
-    if let Some(number) = value.as_f64() {
-        return Ok(vec![vec![number]]);
-    }
-    Err("Expected tabular numeric payload".to_string())
-}
-
-fn parse_csv_rows(payload: &[u8], cfg: &AppConfig) -> Result<Vec<Vec<f64>>, String> {
-    let text =
-        std::str::from_utf8(payload).map_err(|err| format!("invalid utf-8 csv payload: {err}"))?;
-    let mut lines = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !cfg.csv_skip_blank_lines || !line.is_empty())
-        .collect::<Vec<&str>>();
-    if lines.is_empty() {
-        return Err("Empty CSV payload".to_string());
-    }
-    match cfg.csv_has_header.as_str() {
-        "true" => {
-            lines.remove(0);
-        }
-        "auto" => {
-            if csv_first_row_is_header(lines[0], cfg.csv_delimiter.as_str()) {
-                lines.remove(0);
-            }
-        }
-        "false" => {}
-        _ => return Err("CSV_HAS_HEADER must be auto|true|false".to_string()),
-    }
-    if lines.is_empty() {
-        return Err("CSV payload contains only header row".to_string());
-    }
-    let delim = cfg.csv_delimiter.as_str();
-    lines
-        .iter()
-        .map(|line| {
-            line.split(delim)
-                .map(|token| {
-                    token
-                        .trim()
-                        .parse::<f64>()
-                        .map_err(|_| "Expected numeric value in CSV payload".to_string())
-                })
-                .collect::<Result<Vec<f64>, String>>()
-        })
-        .collect::<Result<Vec<Vec<f64>>, String>>()
-}
-
-fn csv_first_row_is_header(line: &str, delim: &str) -> bool {
-    line.split(delim)
-        .any(|token| token.trim().parse::<f64>().is_err())
-}
-
-fn parse_col_selector(selector: &str, n_cols: usize) -> Result<Vec<usize>, String> {
-    let trimmed = selector.trim();
-    if trimmed.is_empty() {
-        return Ok((0..n_cols).collect::<Vec<usize>>());
-    }
-    if let Some((start_raw, end_raw)) = trimmed.split_once(':') {
-        let start = if start_raw.is_empty() {
-            0
-        } else {
-            start_raw
-                .parse::<usize>()
-                .map_err(|_| "Invalid column selector".to_string())?
-        };
-        let end = if end_raw.is_empty() {
-            n_cols
-        } else {
-            end_raw
-                .parse::<usize>()
-                .map_err(|_| "Invalid column selector".to_string())?
-        };
-        let bounded_end = end.min(n_cols);
-        return Ok((start.min(bounded_end)..bounded_end).collect::<Vec<usize>>());
-    }
-    trimmed
-        .split(',')
-        .filter(|tok| !tok.trim().is_empty())
-        .map(|tok| {
-            tok.trim()
-                .parse::<usize>()
-                .map_err(|_| "Invalid column selector".to_string())
-        })
-        .collect::<Result<Vec<usize>, String>>()
-}
-
-fn normalized_accept(accept: &str, default_accept: &str) -> String {
-    // skipcq: RS-W1031. Clippy enforces unwrap_or here because the fallback is a cheap borrowed &str.
-    accept
-        .split(',')
-        .next()
-        .unwrap_or(default_accept)
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn wrap_predictions_if_needed(predictions: Value, cfg: &AppConfig) -> Value {
-    if cfg.predictions_only {
-        return predictions;
-    }
-    let mut output: serde_json::Map<String, Value> = serde_json::Map::default();
-    output.insert(cfg.json_output_key.clone(), predictions);
-    Value::Object(output)
-}
-
-fn validate_payload_size(payload_len: usize, cfg: &AppConfig) -> Option<AxumResponse> {
-    if payload_len <= cfg.max_body_bytes {
-        return None;
-    }
-    Some(
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({
-                "error": "payload_too_large",
-                "max_bytes": cfg.max_body_bytes
-            })),
-        )
-            .into_response(),
-    )
-}
-
-fn resolve_request_media_types(headers: &HeaderMap, cfg: &AppConfig) -> (String, String) {
-    (
-        header_value_with_fallback(
-            headers,
-            CONTENT_TYPE,
-            SAGEMAKER_CONTENT_TYPE_HEADER,
-            cfg.default_content_type.as_str(),
-        ),
-        header_value_with_fallback(
-            headers,
-            ACCEPT,
-            SAGEMAKER_ACCEPT_HEADER,
-            cfg.default_accept.as_str(),
-        ),
-    )
-}
-
-async fn acquire_inflight_permit(
-    state: &Arc<AppState>,
-) -> Result<OwnedSemaphorePermit, AxumResponse> {
-    match timeout(
-        Duration::from_secs_f64(state.cfg.acquire_timeout_s.max(0.0)),
-        state.inflight.clone().acquire_owned(),
-    )
-    .await
-    {
-        Ok(Ok(permit)) => Ok(permit),
-        _ => Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({"error": "too_many_requests"})),
-        )
-            .into_response()),
-    }
-}
-
-async fn parse_and_validate_request(
-    state: &Arc<AppState>,
-    payload: &[u8],
-    content_type: &str,
-) -> Result<(ParsedInput, usize), AxumResponse> {
-    let parsed = state
-        .parse_payload(payload, content_type)
-        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response())?;
-    let batch = parsed
-        .batch_size()
-        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response())?;
-    if batch > state.cfg.max_records {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("too_many_records: {batch} > {}", state.cfg.max_records) })),
-        )
-            .into_response());
-    }
-    Ok((parsed, batch))
-}
-
-async fn predict_and_format(
-    state: &Arc<AppState>,
-    parsed: &ParsedInput,
-    accept: &str,
-) -> Result<(Vec<u8>, String), AxumResponse> {
-    let adapter = state.ensure_adapter_loaded().await.map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err })),
-        )
-            .into_response()
-    })?;
-    let predictions = adapter
-        .predict(parsed)
-        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response())?;
-    state
-        .format_output(predictions, accept)
-        .map_err(|err| (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response())
-}
-
-fn build_success_response(body: Vec<u8>, content_type: String) -> AxumResponse {
-    let mut response = (StatusCode::OK, body).into_response();
-    if let Ok(header) = content_type.parse() {
-        response.headers_mut().insert(CONTENT_TYPE, header);
-    }
-    attach_trace_correlation_headers(&mut response);
-    response
-}
-
-fn read_openapi_from_env() -> Option<String> {
-    let path = std::env::var(OPENAPI_SPEC_PATH_ENV_KEY).ok()?;
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    fs::read_to_string(trimmed).ok()
-}
-
-fn openapi_candidate_paths() -> [PathBuf; 2] {
-    [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("docs")
-            .join("openapi.yaml"),
-        PathBuf::from("docs").join("openapi.yaml"),
-    ]
-}
-
-fn format_csv_predictions(predictions: &Value, delimiter: &str) -> Result<String, String> {
-    if let Some(rows) = predictions.as_array() {
-        if rows.first().is_some_and(|item| item.is_array()) {
-            let mut out = Vec::new();
-            for row in rows {
-                let cols = row
-                    .as_array()
-                    .ok_or_else(|| "expected csv row array".to_string())?
-                    .iter()
-                    .map(value_to_string)
-                    .collect::<Vec<String>>();
-                out.push(cols.join(delimiter));
-            }
-            return Ok(out.join("\n"));
-        }
-        let lines = rows.iter().map(value_to_string).collect::<Vec<String>>();
-        return Ok(lines.join("\n"));
-    }
-    Ok(value_to_string(predictions))
-}
-
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => String::default(),
-        Value::Bool(v) => v.to_string(),
-        Value::Number(v) => v.to_string(),
-        Value::String(v) => v.clone(),
-        _ => value.to_string(),
-    }
-}
-
-pub fn build_http_router(cfg: AppConfig) -> Router {
-    let metrics_path = cfg.prometheus_path.clone();
-    let prometheus_enabled = cfg.prometheus_enabled;
-    let swagger_enabled = cfg.swagger_enabled;
-    let state = Arc::new(AppState::new(cfg));
-    let mut router = Router::new()
-        .route("/live", get(http_live))
-        .route("/healthz", get(http_live))
-        .route("/ready", get(http_ready))
-        .route("/readyz", get(http_ready))
-        .route("/ping", get(http_ready))
-        .route("/invocations", post(http_invocations));
-    if swagger_enabled {
-        router = router
-            .route("/openapi.yaml", get(http_openapi_spec))
-            .route("/docs", get(http_swagger_ui));
-    }
-    if prometheus_enabled {
-        router = router.route(metrics_path.as_str(), get(http_metrics));
-    }
-    router.with_state(state)
-}
-
-async fn http_live() -> impl IntoResponse {
-    (StatusCode::OK, "\n")
-}
-
-async fn http_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.ensure_adapter_loaded().await {
-        Ok(adapter) if adapter.is_ready() => (StatusCode::OK, "\n").into_response(),
-        Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "\n").into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "\n").into_response(),
-    }
-}
-
-async fn http_metrics() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        "# HELP byoc_up Service readiness\n# TYPE byoc_up gauge\nbyoc_up 1\n",
-    )
-        .into_response()
-}
-
-async fn http_openapi_spec() -> impl IntoResponse {
-    if let Some(spec) = load_openapi_yaml() {
-        return ([(CONTENT_TYPE, "application/yaml; charset=utf-8")], spec).into_response();
-    }
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"error": "openapi_contract_not_found"})),
-    )
-        .into_response()
-}
-
-async fn http_swagger_ui() -> impl IntoResponse {
-    Html(SWAGGER_UI_HTML)
-}
-
-async fn http_invocations(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    payload: Bytes,
-) -> AxumResponse {
-    if let Some(response) = validate_payload_size(payload.len(), &state.cfg) {
-        return response;
-    }
-
-    let (content_type, accept) = resolve_request_media_types(&headers, &state.cfg);
-    let _permit = match acquire_inflight_permit(&state).await {
-        Ok(permit) => permit,
-        Err(response) => return response,
-    };
-    let (parsed, _) =
-        match parse_and_validate_request(&state, payload.as_ref(), &content_type).await {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
-    let (body, output_content_type) = match predict_and_format(&state, &parsed, &accept).await {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    build_success_response(body, output_content_type)
-}
-
-fn load_openapi_yaml() -> Option<String> {
-    if let Some(spec) = read_openapi_from_env() {
-        return Some(spec);
-    }
-
-    for path in openapi_candidate_paths() {
-        if let Ok(spec) = fs::read_to_string(&path) {
-            return Some(spec);
-        }
-    }
-    None
-}
-
-fn header_value_with_fallback(
-    headers: &HeaderMap,
-    primary: HeaderName,
-    fallback: &str,
-    default: &str,
-) -> String {
-    if let Some(value) = headers.get(primary).and_then(|h| h.to_str().ok()) {
-        return value.to_string();
-    }
-    if let Ok(fallback_name) = HeaderName::from_lowercase(fallback.as_bytes()) {
-        if let Some(value) = headers.get(fallback_name).and_then(|h| h.to_str().ok()) {
-            return value.to_string();
-        }
-    }
-    default.to_string()
-}
+pub use grpc_service::InferenceGrpcService;
+pub use http::build_http_router;
 
 pub async fn serve_http(listener: TcpListener, cfg: AppConfig) -> Result<(), std::io::Error> {
     let app = build_http_router(cfg);
@@ -1068,156 +187,31 @@ pub async fn run_grpc_server(
     serve_grpc(listener, cfg).await
 }
 
-#[derive(Clone)]
-pub struct InferenceGrpcService {
-    state: AppState,
-    load_error: Option<String>,
-}
-
-impl InferenceGrpcService {
-    fn new(cfg: AppConfig) -> Self {
-        let state = AppState::new(cfg.clone());
-        match load_adapter(&cfg) {
-            Ok(_) => {
-                // Pre-populate the adapter in the state synchronously
-                // We can't use async here, but ensure_adapter_loaded will populate it on first use
-                // The ready check and predict will ensure it's loaded before use
-                Self {
-                    state,
-                    load_error: None,
-                }
-            }
-            Err(err) => Self {
-                state,
-                load_error: Some(err),
-            },
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl grpc::inference_service_server::InferenceService for InferenceGrpcService {
-    async fn live(
-        &self,
-        _request: Request<grpc::LiveRequest>,
-    ) -> Result<Response<grpc::StatusReply>, Status> {
-        Ok(Response::new(grpc::StatusReply {
-            ok: true,
-            status: "live".to_string(),
-        }))
-    }
-
-    async fn ready(
-        &self,
-        _request: Request<grpc::ReadyRequest>,
-    ) -> Result<Response<grpc::StatusReply>, Status> {
-        let ready = match self.state.ensure_adapter_loaded().await {
-            Ok(_) => self
-                .state
-                .adapter
-                .read()
-                .await
-                .as_ref()
-                .is_some_and(|adapter| adapter.is_ready()),
-            Err(_) => false,
-        };
-        Ok(Response::new(grpc::StatusReply {
-            ok: ready,
-            status: if ready {
-                "ready".to_string()
-            } else {
-                "not_ready".to_string()
-            },
-        }))
-    }
-
-    async fn predict(
-        &self,
-        request: Request<grpc::PredictRequest>,
-    ) -> Result<Response<grpc::PredictReply>, Status> {
-        if let Some(err) = &self.load_error {
-            return Err(Status::new(Code::Internal, err.clone()));
-        }
-        let req = request.into_inner();
-
-        // Enforce max_body_bytes to maintain HTTP/gRPC parity
-        if req.payload.len() > self.state.cfg.max_body_bytes {
-            return Err(Status::new(
-                Code::InvalidArgument,
-                format!(
-                    "payload too large: {} bytes > {} bytes limit",
-                    req.payload.len(),
-                    self.state.cfg.max_body_bytes
-                ),
-            ));
-        }
-
-        // Apply max_inflight semaphore for HTTP/gRPC parity
-        let _permit = match timeout(
-            Duration::from_secs_f64(self.state.cfg.acquire_timeout_s.max(0.0)),
-            self.state.inflight.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            _ => {
-                return Err(Status::new(Code::ResourceExhausted, "too_many_requests"));
-            }
-        };
-
-        let content_type = if req.content_type.is_empty() {
-            self.state.cfg.default_content_type.as_str()
-        } else {
-            req.content_type.as_str()
-        };
-        let accept = if req.accept.is_empty() {
-            self.state.cfg.default_accept.as_str()
-        } else {
-            req.accept.as_str()
-        };
-
-        let adapter = self
-            .state
-            .ensure_adapter_loaded()
-            .await
-            .map_err(|err| Status::new(Code::Internal, err))?;
-        let parsed = self
-            .state
-            .parse_payload(req.payload.as_ref(), content_type)
-            .map_err(|err| Status::new(Code::InvalidArgument, err))?;
-        let batch = parsed
-            .batch_size()
-            .map_err(|err| Status::new(Code::InvalidArgument, err))?;
-        if batch > self.state.cfg.max_records {
-            return Err(Status::new(
-                Code::InvalidArgument,
-                format!("too_many_records: {batch} > {}", self.state.cfg.max_records),
-            ));
-        }
-        let predictions = adapter
-            .predict(&parsed)
-            .map_err(|err| Status::new(Code::InvalidArgument, err))?;
-        let (body, output_content_type) = self
-            .state
-            .format_output(predictions, accept)
-            .map_err(|err| Status::new(Code::InvalidArgument, err))?;
-        let mut metadata = HashMap::new();
-        metadata.insert("batch_size".to_string(), batch.to_string());
-        Ok(Response::new(grpc::PredictReply {
-            body,
-            content_type: output_content_type,
-            metadata,
-        }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::{load_adapter, OnnxAdapter};
     use crate::grpc::inference_service_server::InferenceService;
+    use crate::grpc_service::InferenceGrpcService;
+    use crate::http::{
+        header_value_with_fallback, http_invocations, resolve_request_media_types,
+        validate_payload_size, SAGEMAKER_ACCEPT_HEADER, SAGEMAKER_CONTENT_TYPE_HEADER,
+    };
+    use crate::input::{
+        apply_feature_selection, format_csv_predictions, load_json_map, load_multi_input_records,
+        normalized_accept, parse_col_selector, parse_csv_rows, parse_json_records, parse_json_rows,
+        parse_jsonl_records, parse_jsonl_rows, should_use_onnx_multi_input,
+        strip_content_type_params, validate_dynamic_batch_sizes, validate_input_mode,
+        validate_tabular_matrix_shape, value_to_numeric_rows, wrap_predictions_if_needed,
+    };
+    use crate::openapi::{
+        openapi_candidate_paths, read_openapi_from_env, OPENAPI_SPEC_PATH_ENV_KEY,
+    };
     use axum::body::to_bytes;
     use axum::body::Bytes;
-    use axum::http::HeaderValue;
+    use axum::extract::State;
+    use axum::http::header::{ACCEPT, CONTENT_TYPE};
+    use axum::http::{HeaderMap, HeaderName, StatusCode};
     use proptest::prelude::*;
     use std::env;
     use std::fs;
@@ -1421,8 +415,11 @@ mod tests {
     #[test]
     fn request_phase_helpers_cover_media_resolution_and_size_checks() {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("text/csv"));
+        headers.insert(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(ACCEPT, axum::http::HeaderValue::from_static("text/csv"));
         let cfg = AppConfig::default();
         let (content_type, accept) = resolve_request_media_types(&headers, &cfg);
         assert_eq!(content_type, "application/json");
@@ -1568,7 +565,10 @@ mod tests {
     #[test]
     fn header_value_with_fallback_prefers_primary_then_fallback_then_default() {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/csv"));
+        headers.insert(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/csv"),
+        );
         let value = header_value_with_fallback(
             &headers,
             CONTENT_TYPE,
@@ -1580,7 +580,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static(SAGEMAKER_CONTENT_TYPE_HEADER),
-            HeaderValue::from_static("application/json"),
+            axum::http::HeaderValue::from_static("application/json"),
         );
         let fallback = header_value_with_fallback(
             &headers,
@@ -1631,6 +631,9 @@ mod tests {
 
     #[tokio::test]
     async fn http_live_and_metrics_handlers_return_ok_with_expected_payloads() {
+        use crate::http::{http_live, http_metrics};
+        use axum::response::IntoResponse;
+
         let live = http_live().await.into_response();
         assert_eq!(live.status(), StatusCode::OK);
         let live_body = to_bytes(live.into_body(), usize::MAX)
@@ -1668,6 +671,9 @@ mod tests {
 
     #[tokio::test]
     async fn swagger_handlers_serve_openapi_and_ui() {
+        use crate::http::{http_openapi_spec, http_swagger_ui};
+        use axum::response::IntoResponse;
+
         let tmp = tempfile::tempdir().expect("temp dir");
         let spec_path = tmp.path().join("openapi.yaml");
         fs::write(&spec_path, "openapi: 3.1.0\n").expect("write openapi spec");
@@ -1913,7 +919,10 @@ mod tests {
             inflight: Arc::new(Semaphore::new(0)),
         });
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
         let response = http_invocations(
             State(state),
             headers,
@@ -1930,11 +939,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static(SAGEMAKER_CONTENT_TYPE_HEADER),
-            HeaderValue::from_static("application/json"),
+            axum::http::HeaderValue::from_static("application/json"),
         );
         headers.insert(
             HeaderName::from_static(SAGEMAKER_ACCEPT_HEADER),
-            HeaderValue::from_static("text/csv"),
+            axum::http::HeaderValue::from_static("text/csv"),
         );
         let response = http_invocations(
             State(state),
@@ -1964,14 +973,14 @@ mod tests {
         let service = InferenceGrpcService::new(cfg);
 
         let live = service
-            .live(Request::new(grpc::LiveRequest {}))
+            .live(Request::new(crate::grpc::LiveRequest {}))
             .await
             .expect("live must succeed")
             .into_inner();
         assert!(live.ok);
 
         let ready = service
-            .ready(Request::new(grpc::ReadyRequest {}))
+            .ready(Request::new(crate::grpc::ReadyRequest {}))
             .await
             .expect("ready must respond")
             .into_inner();
@@ -1979,14 +988,14 @@ mod tests {
         assert_eq!(ready.status, "not_ready");
 
         let predict = service
-            .predict(Request::new(grpc::PredictRequest {
+            .predict(Request::new(crate::grpc::PredictRequest {
                 payload: b"1,2\n".to_vec(),
                 content_type: "text/csv".to_string(),
                 accept: "application/json".to_string(),
             }))
             .await
             .expect_err("predict should fail when model failed loading");
-        assert_eq!(predict.code(), Code::Internal);
+        assert_eq!(predict.code(), tonic::Code::Internal);
     }
 
     #[tokio::test]
@@ -2003,14 +1012,14 @@ mod tests {
         };
 
         let result = service
-            .predict(Request::new(grpc::PredictRequest {
+            .predict(Request::new(crate::grpc::PredictRequest {
                 payload: br#"{"instances":[[1.0,2.0]]}"#.to_vec(),
                 content_type: "application/json".to_string(),
                 accept: "application/json".to_string(),
             }))
             .await
             .expect_err("must fail when semaphore has no permits");
-        assert_eq!(result.code(), Code::ResourceExhausted);
+        assert_eq!(result.code(), tonic::Code::ResourceExhausted);
         assert!(result.message().contains("too_many_requests"));
     }
 
@@ -2019,7 +1028,7 @@ mod tests {
         let (_tmp, cfg) = cfg_with_temp_model_fixture();
         let service = InferenceGrpcService::new(cfg);
         let reply = service
-            .predict(Request::new(grpc::PredictRequest {
+            .predict(Request::new(crate::grpc::PredictRequest {
                 payload: br#"{"instances":[[1.0,2.0],[3.0,4.0]]}"#.to_vec(),
                 content_type: "application/json".to_string(),
                 accept: "".to_string(),
@@ -2043,7 +1052,10 @@ mod tests {
         let (_tmp, cfg) = cfg_with_temp_model_fixture();
         let state = Arc::new(AppState::new(cfg));
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
 
         // Same payload shape as `http_invocations_accepts_sagemaker_header_fallbacks`
         // — the bundled fixture model expects 2-column input rows.
