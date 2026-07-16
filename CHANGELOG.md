@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.2](https://github.com/ffreis-org/ffreis-rust-onnx-model-serving/compare/v1.0.1...v1.0.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* **ci:** pin ffreis-workflows-general to v1.7.0 ([#89](https://github.com/ffreis-org/ffreis-rust-onnx-model-serving/issues/89)) ([6c1e578](https://github.com/ffreis-org/ffreis-rust-onnx-model-serving/commit/6c1e5789458056207cb4535ba46ef68fcbd3d165))
+* **security:** apt-get upgrade + non-root USER in Dockerfile ([#88](https://github.com/ffreis-org/ffreis-rust-onnx-model-serving/issues/88)) ([0b39280](https://github.com/ffreis-org/ffreis-rust-onnx-model-serving/commit/0b39280954f41c4affc7ba44c146d810da2ca664))
+
 ## [1.0.1](https://github.com/FelipeFuhr/ffreis-rust-onnx-model-serving/compare/v1.0.0...v1.0.1) (2026-06-13)
 
 
