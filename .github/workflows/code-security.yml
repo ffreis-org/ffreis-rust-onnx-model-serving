@@ -26,7 +26,7 @@ jobs:
   cargo-audit:
     permissions:
       contents: read
-    uses: FelipeFuhr/ffreis-workflows-rust/.github/workflows/rust-security.yml@f3f3acf975d34494fb6d54ad107195a8808bc722
+    uses: ffreis-org/ffreis-workflows-rust/.github/workflows/rust-security.yml@f3f3acf975d34494fb6d54ad107195a8808bc722
     with:
       working-directory: "app"
       ignore-advisories: "RUSTSEC-2026-0009"

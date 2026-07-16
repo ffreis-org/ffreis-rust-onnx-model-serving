@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   lefthook-complex:
-    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-lefthook-complex.yml@55caebd74b1d1057c52ab6745d5809bddc8406de # v1.4.1
+    uses: ffreis-org/ffreis-workflows-general/.github/workflows/general-lefthook-complex.yml@55caebd74b1d1057c52ab6745d5809bddc8406de # v1.4.1
     with:
       working-directory: "."
       tier: ${{ inputs.tier }}

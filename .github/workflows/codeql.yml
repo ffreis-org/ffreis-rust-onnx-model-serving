@@ -19,6 +19,6 @@ jobs:
       actions: read
       contents: read
       security-events: write
-    uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-codeql.yml@b4d4d5ad74c44cc758be8cbed14720747e97adfc # v1.6.0
+    uses: ffreis-org/ffreis-workflows-general/.github/workflows/general-codeql.yml@b4d4d5ad74c44cc758be8cbed14720747e97adfc # v1.6.0
     with:
       languages: "rust"

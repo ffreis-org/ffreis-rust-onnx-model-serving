@@ -31,7 +31,7 @@ jobs:
     if: ${{ !github.event.pull_request.draft && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false) }}
     permissions:
       contents: read
-    uses: FelipeFuhr/ffreis-workflows-rust/.github/workflows/rust-sonar.yml@98d5d139853a40c6ae4175ead25a5b09e4130104 # main
+    uses: ffreis-org/ffreis-workflows-rust/.github/workflows/rust-sonar.yml@98d5d139853a40c6ae4175ead25a5b09e4130104 # main
     with:
       working-directory: .
     secrets:
